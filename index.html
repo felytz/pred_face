@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Face Recognition with TensorFlow.js</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    #result {
+      font-weight: bold;
+      font-size: 2rem;
+      text-align: center;
+      min-height: 8rem;
+    }
+    #confidence {
+      font-size: 1.5rem;
+      text-align: center;
+      color: #6c757d;
+    }
+    #model-info {
+      font-size: 1rem;
+      background: #f8f9fa;
+      padding: 10px;
+      border-radius: 5px;
+      margin: 10px 0;
+    }
+    #camera-select {
+      margin-bottom: 10px;
+    }
+    #graphs-container {
+      display: none;
+      margin-top: 20px;
+    }
+    .model-graph {
+      max-width: 100%;
+      height: auto;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      margin-bottom: 15px;
+    }
+    .graph-row {
+      display: flex;
+      flex-direction: column;
+      gap: 15px;
+    }
+    .controls-row {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 15px;
+    }
+    #top-predictions {
+      margin-top: 20px;
+    }
+    .prediction-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 5px 0;
+      border-bottom: 1px solid #eee;
+    }
+    .prediction-name {
+      font-weight: 500;
+    }
+    .prediction-bar {
+      height: 20px;
+      background-color: #0d6efd;
+      border-radius: 3px;
+      margin-top: 5px;
+    }
+    .face-box {
+      position: absolute;
+      border: 3px solid #0d6efd;
+      border-radius: 5px;
+      background-color: rgba(13, 110, 253, 0.2);
+    }
+    #face-canvas {
+      display: none;
+    }
+    .confidence-low {
+      color: #dc3545;
+    }
+    .confidence-medium {
+      color: #ffc107;
+    }
+    .confidence-high {
+      color: #198754;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="px-4 py-2 my-2 text-center border-bottom">
+      <h1 class="display-5 fw-bold">Face Recognition</h1>
+      <div class="col-lg-6 mx-auto">
+        <p class="lead mb-0">Real-time recognition with TensorFlow.js</p>
+      </div>
+    </div>
+
+    <div class="container mt-4">
+      <div class="row justify-content-center">
+        <div class="col-12 col-md-8 text-center">
+          <!-- Camera Feed -->
+          <div class="position-relative mb-3">
+            <video id="video" width="400" height="400" autoplay muted playsinline class="img-fluid border rounded"></video>
+            <canvas id="canvas" width="400" height="400" style="display: none;"></canvas>
+            <canvas id="face-canvas" width="224" height="224" style="display: none;"></canvas>
+            <div class="position-absolute top-0 start-0 m-2">
+              <span id="facing-mode" class="badge bg-secondary">Camera</span>
+            </div>
+          </div>
+          
+          <!-- Camera Selection -->
+          <select id="camera-select" class="form-select d-none">
+            <option value="">Select camera...</option>
+          </select>
+          
+          <!-- Prediction Output -->
+          <div id="model-info" class="text-start">
+            <div>Model loaded: <span id="model-name">Face Recognition Model</span></div>
+            <div>Confidence threshold: <span id="threshold-value">0.7</span></div>
+          </div>
+          
+          <div id="result" class="my-3"></div>
+          <div id="confidence"></div>
+          
+          <!-- Top Predictions -->
+          <div id="top-predictions" class="text-start mt-3"></div>
+          
+          <!-- Controls -->
+          <div class="controls-row">
+            <div class="d-flex justify-content-between align-items-center">
+              <button id="toggle-graphs" class="btn btn-info">Show Training Graphs</button>
+              <button id="switch-camera" class="btn btn-secondary">Switch Camera</button>
+            </div>
+            <div class="d-flex align-items-center">
+              <label for="threshold" class="form-label me-2 mb-0">Confidence Threshold:</label>
+              <input type="range" class="form-range" id="threshold" min="0.5" max="0.95" step="0.05" value="0.7">
+              <span id="threshold-display" class="ms-2">0.7</span>
+            </div>
+          </div>
+
+          <!-- Graphs Container -->
+          <div id="graphs-container" class="mt-3">
+            <div class="graph-row">
+              <img id="acc-graph" class="model-graph" src="training_results/accuracy_loss.png" alt="Accuracy and Loss Graph">
+              <img id="dist-graph" class="model-graph" src="training_results/class_distribution.png" alt="Class Distribution">
+              <img id="cm-graph" class="model-graph" src="training_results/confusion_matrix.png" alt="Confusion Matrix">
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.5.0/dist/tf.min.js"></script>
+  
+  <script>
+    // Face classes
+    const CLASSES = [
+      'Angel', 'Celia', 'Eddel', 'Federico', 'Feliciano','Fernando', 'Jennifer', 'Jesus', 'Kevin', 'Manuel', 'Sebastian'
+    ];
+
+    // App State
+    const state = {
+      currentModel: null,
+      stream: null,
+      facingMode: 'environment',
+      isModelLoading: false,
+      devices: [],
+      currentDeviceId: null,
+      showGraphs: false,
+      confidenceThreshold: 0.7,
+      faceDetectionModel: null
+    };
+
+    // DOM Elements
+    const elements = {
+      video: document.getElementById('video'),
+      canvas: document.getElementById('canvas'),
+      faceCanvas: document.getElementById('face-canvas'),
+      result: document.getElementById('result'),
+      confidence: document.getElementById('confidence'),
+      modelName: document.getElementById('model-name'),
+      thresholdValue: document.getElementById('threshold-value'),
+      thresholdDisplay: document.getElementById('threshold-display'),
+      thresholdInput: document.getElementById('threshold'),
+      facingMode: document.getElementById('facing-mode'),
+      switchCamera: document.getElementById('switch-camera'),
+      cameraSelect: document.getElementById('camera-select'),
+      toggleGraphs: document.getElementById('toggle-graphs'),
+      graphsContainer: document.getElementById('graphs-container'),
+      accGraph: document.getElementById('acc-graph'),
+      distGraph: document.getElementById('dist-graph'),
+      cmGraph: document.getElementById('cm-graph'),
+      topPredictions: document.getElementById('top-predictions')
+    };
+
+    // Initialize
+    document.addEventListener('DOMContentLoaded', async () => {
+      if (!checkWebGL() || !checkTFJS()) {
+        elements.result.textContent = "Your browser doesn't support all required features";
+        return;
+      }
+
+      elements.result.textContent = "Initializing...";
+      
+      try {
+        await tf.ready();
+        console.log('TensorFlow.js is ready');
+        
+        // Load face detection model (Blazeface)
+        await loadFaceDetectionModel();
+        
+        // Load recognition model
+        await loadRecognitionModel();
+        
+        // Setup camera
+        await getCameraDevices();
+        if (state.devices.length > 0) {
+          state.currentDeviceId = state.devices[0].deviceId;
+          populateCameraSelect();
+        }
+        await setupCamera();
+        
+        setupEventListeners();
+        detectAndRecognize();
+
+      } catch (error) {
+        console.error("Initialization error:", error);
+        elements.result.textContent = `Error: ${error.message}`;
+      }
+    });
+
+    function checkWebGL() {
+      const gl = document.createElement('canvas').getContext('webgl');
+      if (!gl) {
+        alert('WebGL is not available in your browser. The app may not work correctly.');
+        return false;
+      }
+      return true;
+    }
+
+    function checkTFJS() {
+      if (!tf || !tf.browser || !tf.loadGraphModel) {
+        alert('TensorFlow.js is not loaded correctly. Please refresh the page.');
+        return false;
+      }
+      return true;
+    }
+
+    async function loadFaceDetectionModel() {
+      const modelUrl = 'https://tfhub.dev/tensorflow/tfjs-model/blazeface/1/default/1/model.json?tfjs-format=compressed';
+      state.faceDetectionModel = await tf.loadGraphModel(modelUrl, { fromTFHub: true });
+      console.log('Face detection model loaded');
+    }
+
+    async function loadRecognitionModel() {
+      if (state.currentModel) return;
+      
+      const modelPath = 'tfjs_model/model.json';
+      
+      try {
+        const response = await fetch(modelPath);
+        if (!response.ok) {
+          throw new Error(`Model not found at ${modelPath}`);
+        }
+
+        state.currentModel = await tf.loadGraphModel(modelPath);
+        
+        // Verify input shape
+        if (!state.currentModel.inputs[0].shape) {
+          console.warn('Model does not have defined input shape, assigning [1,224,224,3]');
+          state.currentModel.inputs[0].shape = [1, 224, 224, 3];
+        }
+        
+        console.log('Recognition model loaded successfully');
+        
+      } catch (error) {
+        console.error('Error loading recognition model:', error);
+        throw error;
+      }
+    }
+
+    async function setupCamera() {
+      if (state.stream) {
+        state.stream.getTracks().forEach(track => track.stop());
+      }
+
+      const constraints = {
+        video: {
+          width: { ideal: 400 },
+          height: { ideal: 400 },
+          facingMode: isMobile() ? state.facingMode : 'user',
+          deviceId: state.currentDeviceId ? { exact: state.currentDeviceId } : undefined
+        }
+      };
+
+      try {
+        state.stream = await navigator.mediaDevices.getUserMedia(constraints);
+        elements.video.srcObject = state.stream;
+        elements.video.play();
+      } catch (err) {
+        console.error("Camera error:", err);
+        elements.result.textContent = "Error accessing camera";
+      }
+    }
+
+    function isMobile() {
+      return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    }
+
+    async function detectFaces() {
+      const returnTensors = false;
+      const flipHorizontal = true;
+      const annotateBoxes = true;
+      
+      const img = tf.browser.fromPixels(elements.video);
+      const input = tf.tidy(() => {
+        return tf.image.resizeBilinear(img, [128, 128])
+          .div(255.0)
+          .expandDims(0);
+      });
+      
+      const res = await state.faceDetectionModel.executeAsync(input);
+      const faces = await extractFaces(res, returnTensors, flipHorizontal, annotateBoxes);
+      
+      tf.dispose([img, input, res]);
+      
+      return faces;
+    }
+
+    function extractFaces(res, returnTensors, flipHorizontal, annotateBoxes) {
+      const boxes = res[0].arraySync();
+      const scores = res[1].arraySync()[0];
+      
+      const faces = [];
+      const maxFaces = 1; // We'll process only one face for recognition
+      
+      for (let i = 0; i < Math.min(maxFaces, scores.length); i++) {
+        if (scores[i] > 0.5) { // Face detection confidence threshold
+          const [y1, x1, y2, x2] = boxes[i];
+          
+          faces.push({
+            topLeft: [x1 * elements.video.width, y1 * elements.video.height],
+            bottomRight: [x2 * elements.video.width, y2 * elements.video.height],
+            score: scores[i]
+          });
+        }
+      }
+      
+      return faces;
+    }
+
+    function cropFace(face) {
+      const ctx = elements.canvas.getContext('2d');
+      const faceCtx = elements.faceCanvas.getContext('2d');
+      
+      // Draw video frame to canvas
+      ctx.drawImage(elements.video, 0, 0, elements.canvas.width, elements.canvas.height);
+      
+      // Calculate face dimensions
+      const width = face.bottomRight[0] - face.topLeft[0];
+      const height = face.bottomRight[1] - face.topLeft[1];
+      const size = Math.max(width, height) * 1.2; // Add some padding
+      
+      // Calculate center coordinates
+      const centerX = (face.topLeft[0] + face.bottomRight[0]) / 2;
+      const centerY = (face.topLeft[1] + face.bottomRight[1]) / 2;
+      
+      // Calculate crop coordinates
+      const cropX = centerX - size / 2;
+      const cropY = centerY - size / 2;
+      
+      // Crop and resize face
+      faceCtx.drawImage(
+        elements.canvas,
+        cropX, cropY, size, size, // source rectangle
+        0, 0, 224, 224            // destination rectangle
+      );
+    }
+
+    function prepareFaceImage() {
+      return tf.tidy(() => {
+        // Convert to RGB and normalize for the model
+        return tf.browser.fromPixels(elements.faceCanvas, 3)
+          .toFloat()
+          .div(255.0)
+          .reshape([1, 224, 224, 3]);
+      });
+    }
+
+    function updateUI(predictions, faceDetected) {
+      if (!faceDetected) {
+        elements.result.textContent = "No face detected";
+        elements.confidence.textContent = "";
+        elements.topPredictions.innerHTML = "";
+        return;
+      }
+      
+      // Get top predictions
+      const topPredictions = Array.from(predictions)
+        .map((prob, index) => ({ 
+          className: CLASSES[index], 
+          probability: prob 
+        }))
+        .sort((a, b) => b.probability - a.probability);
+      
+      const topPrediction = topPredictions[0];
+      
+      // Check if confidence meets threshold
+      if (topPrediction.probability < state.confidenceThreshold) {
+        elements.result.textContent = "Unknown face";
+        elements.confidence.textContent = "This face doesn't match any trained person";
+        elements.confidence.className = "confidence-low";
+      } else {
+        elements.result.textContent = topPrediction.className;
+        elements.confidence.textContent = `Confidence: ${(topPrediction.probability * 100).toFixed(1)}%`;
+        
+        // Set confidence color based on level
+        if (topPrediction.probability > 0.85) {
+          elements.confidence.className = "confidence-high";
+        } else if (topPrediction.probability > 0.7) {
+          elements.confidence.className = "confidence-medium";
+        } else {
+          elements.confidence.className = "confidence-low";
+        }
+      }
+      
+      // Update top predictions list (show top 3)
+      elements.topPredictions.innerHTML = '';
+      topPredictions.slice(0, 3).forEach(pred => {
+        const item = document.createElement('div');
+        item.className = 'prediction-item';
+        
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'prediction-name';
+        nameSpan.textContent = pred.className;
+        
+        const probSpan = document.createElement('span');
+        probSpan.textContent = `${(pred.probability * 100).toFixed(1)}%`;
+        
+        item.appendChild(nameSpan);
+        item.appendChild(probSpan);
+        
+        const barContainer = document.createElement('div');
+        barContainer.style.width = '100%';
+        
+        const bar = document.createElement('div');
+        bar.className = 'prediction-bar';
+        bar.style.width = `${pred.probability * 100}%`;
+        
+        barContainer.appendChild(bar);
+        item.appendChild(barContainer);
+        
+        elements.topPredictions.appendChild(item);
+      });
+    }
+
+    async function detectAndRecognize() {
+      if (!state.currentModel || !state.faceDetectionModel) {
+        setTimeout(detectAndRecognize, 100);
+        return;
+      }
+
+      try {
+        // Detect faces
+        const faces = await detectFaces();
+        
+        if (faces.length === 0) {
+          updateUI([], false);
+        } else {
+          // Process the first detected face
+          const face = faces[0];
+          cropFace(face);
+          
+          // Recognize face
+          const inputTensor = prepareFaceImage();
+          const predictions = await state.currentModel.executeAsync(inputTensor);
+          const probabilities = await predictions.data();
+          inputTensor.dispose();
+          tf.dispose(predictions);
+          
+          updateUI(probabilities, true);
+        }
+      } catch (error) {
+        console.error("Recognition error:", error);
+      } finally {
+        requestAnimationFrame(detectAndRecognize);
+      }
+    }
+
+    async function getCameraDevices() {
+      if (!navigator.mediaDevices.enumerateDevices) return;
+      
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        state.devices = devices.filter(device => device.kind === 'videoinput');
+      } catch (err) {
+        console.error("Error enumerating devices:", err);
+      }
+    }
+
+    function populateCameraSelect() {
+      elements.cameraSelect.innerHTML = '<option value="">Select camera...</option>';
+      state.devices.forEach(device => {
+        const option = document.createElement('option');
+        option.value = device.deviceId;
+        option.text = device.label || `Camera ${elements.cameraSelect.length}`;
+        elements.cameraSelect.appendChild(option);
+      });
+    }
+
+    function setupEventListeners() {
+      elements.switchCamera.addEventListener('click', switchCamera);
+      elements.cameraSelect.addEventListener('change', async (e) => {
+        state.currentDeviceId = e.target.value;
+        await setupCamera();
+      });
+      elements.toggleGraphs.addEventListener('click', toggleGraphs);
+      elements.thresholdInput.addEventListener('input', updateThreshold);
+    }
+
+    function toggleGraphs() {
+      state.showGraphs = !state.showGraphs;
+      
+      if (state.showGraphs) {
+        elements.toggleGraphs.textContent = "Hide Training Graphs";
+        elements.graphsContainer.style.display = 'block';
+      } else {
+        elements.toggleGraphs.textContent = "Show Training Graphs";
+        elements.graphsContainer.style.display = 'none';
+      }
+    }
+
+    function updateThreshold() {
+      state.confidenceThreshold = parseFloat(elements.thresholdInput.value);
+      elements.thresholdDisplay.textContent = state.confidenceThreshold.toFixed(2);
+      elements.thresholdValue.textContent = state.confidenceThreshold.toFixed(2);
+    }
+
+    async function switchCamera() {
+      if (isMobile()) {
+        state.facingMode = state.facingMode === 'user' ? 'environment' : 'user';
+      } else {
+        elements.cameraSelect.classList.toggle('d-none');
+        return;
+      }
+      await setupCamera();
+    }
+  </script>
+</body>
+</html>
